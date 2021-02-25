@@ -226,21 +226,22 @@ agents = {
 }
 
 history = []
-bandit_state = {k:[1,1] for k in agents.keys()}
+bandit_state = {k:[1,1,0,0,0,100000] for k in agents.keys()}   # Add UCB item
     
 def multi_armed_bandit_agent (observation, configuration):
     # bandits' params
     step_size = 3 # how much we increase a and b 
     decay_rate = 1.05 # how much do we decay old historical data
-    
+    reward = 2
+    c = 2
     global history, bandit_state
     
-    def log_step(step = None, history = None, agent = None, competitorStep = None, file = 'history.csv'):
+    def log_step(step = None, history = None, ucb_agent = None, ucb_step = None, file = 'history.csv'):
         if step is None:
             step = np.random.randint(3)
         if history is None:
             history = []
-        history.append({'step': step, 'competitorStep': competitorStep, 'agent': agent})
+        history.append({'step': step, 'competitorStep': None, 'ucb_agent': ucb_agent, 'ucb_step': ucb_step})
         if file is not None:
             pd.DataFrame(history).to_csv(file, index = False)
         return step
@@ -257,6 +258,7 @@ def multi_armed_bandit_agent (observation, configuration):
         
         # updating bandit_state using the result of the previous step
         # we can update all states even those that were not used
+        
         for name, agent in agents.items():
             agent_step = agent.step(history[:-1])
             bandit_state[name][1] = (bandit_state[name][1] - 1) / decay_rate + 1
@@ -264,26 +266,68 @@ def multi_armed_bandit_agent (observation, configuration):
             
             if (history[-1]['competitorStep'] - agent_step) % 3 == 1:
                 bandit_state[name][1] += step_size
+                bandit_state[name][2] += -1
+                
             elif (history[-1]['competitorStep'] - agent_step) % 3 == 2:
                 bandit_state[name][0] += step_size
+                bandit_state[name][2] += 1
             else:
                 bandit_state[name][0] += step_size/2
                 bandit_state[name][1] += step_size/2
-            
+                bandit_state[name][2] += 0
+
+        ucb_agent = history[-1]['ucb_agent']
+        if (history[-1]['competitorStep'] - history[-1]['ucb_step']) % 3 == 1:
+            bandit_state[ucb_agent][2] -= reward
+        elif (history[-1]['competitorStep'] - history[-1]['ucb_step']) % 3 == 2:
+            bandit_state[ucb_agent][2] += reward
+        else:
+            bandit_state[ucb_agent][2] += 0
+        bandit_state[ucb_agent][3] += 1
+        logt = np.log(len(history))
+
+        # update estimation
+        bandit_state[ucb_agent][5] = bandit_state[ucb_agent][2] / bandit_state[ucb_agent][3] + c * np.sqrt(logt/bandit_state[ucb_agent][4])
+        for name, agent in agents.items():
+            if bandit_state[name][5] != 100000:
+                bandit_state[name][5] = bandit_state[name][2] / bandit_state[name][3] + c * np.sqrt(logt/bandit_state[name][4])
+        
+
     # we can use it for analysis later
     with open('bandit.json', 'w') as outfile:
         json.dump(bandit_state, outfile)
     
     
     # generate random number from Beta distribution for each agent and select the most lucky one
-    best_proba = -1
-    best_agent = None
+    num = 6
+    best_probas = [-1 for i in range(num)]
+    best_agents = [None for i in range(num)]
+    ucb_item = -1000
+    ucb_agent = None
+    count = 0
     for k in bandit_state.keys():
         proba = np.random.beta(bandit_state[k][0],bandit_state[k][1])
-        if proba > best_proba:
-            best_proba = proba
-            best_agent = k
-        
-    step = agents[best_agent].step(history)
+        if count <= 2:
+            best_probas[count] = proba
+            best_agents[count] = k
+            count += 1
+        else:
+            if proba > np.min(best_probas):
+                discard_index = np.argmin(best_probas)
+                best_probas[discard_index] = proba
+                best_agents[discard_index] = k
+
+        if bandit_state[k][5] > ucb_item:
+            ucb_item = bandit_state[k][5]
+            ucb_agent = k
     
-    return log_step(step, history, best_agent)
+    bandit_state[ucb_agent][4] += 1
+    best_agents.append(ucb_agent)
+    action_list = []
+    for agent in best_agents:
+        step = agents[agent].step(history)
+        action_list.append(step)
+
+    step = int(np.argmax(np.bincount(action_list)))
+    _ = log_step(step, history, ucb_agent, action_list[-1])
+    return step
